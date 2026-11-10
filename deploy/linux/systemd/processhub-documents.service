@@ -1,0 +1,24 @@
+# API модуля «Документы». К нему обращается только API платформы (подпись HMAC).
+[Unit]
+Description=Process Hub: сервис документов (127.0.0.1:8010)
+After=network-online.target
+Wants=network-online.target
+PartOf=processhub.target
+StartLimitIntervalSec=0
+
+[Service]
+User=knowledge
+Group=knowledge
+WorkingDirectory=/opt/processhub/knowledge
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/processhub/documents.env
+ExecStart=/opt/processhub/venv/bin/uvicorn knowledge_service.main:app --host 127.0.0.1 --port 8010
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=processhub.target

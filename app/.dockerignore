@@ -1,0 +1,6 @@
+# node_modules собирается в образе под Linux: с Mac или Windows он не годится.
+node_modules/
+dist/
+public/pdfjs/
+*.log
+.DS_Store

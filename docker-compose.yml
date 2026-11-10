@@ -1,0 +1,210 @@
+# Платформа целиком: база, API и веб-приложение.
+#
+#   docker compose up -d --build   — всё: приложение на http://localhost:8080,
+#                                    редактор draw.io на http://localhost:8081
+#   docker compose up -d db        — только база, для разработки с горячей
+#                                    перезагрузкой (uvicorn и vite запускаются
+#                                    локально, см. README.md)
+#   docker compose exec db pg_dump -U sqb sqb > backup.sql   — резервная копия
+#
+# Пароль базы по умолчанию годится только для своей машины: на сервере
+# задайте SQB_DB_PASSWORD (его же возьмёт сервис api).
+# Имя проекта закреплено: от него зависят имена томов с базами. Без него
+# Docker взял бы имя папки, и после переименования папки поднял бы пустые базы.
+name: sqbprocesshub
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sqb
+      POSTGRES_USER: sqb
+      POSTGRES_PASSWORD: ${SQB_DB_PASSWORD:-sqb}
+    ports:
+      # Только с этой машины: базе незачем слушать сеть. Порт 5433, а не
+      # 5432: на машинах разработчиков 5432 часто занят своим PostgreSQL.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sqb -d sqb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    environment:
+      SQB_DATABASE_URL: postgresql://sqb:${SQB_DB_PASSWORD:-sqb}@db:5432/sqb
+      SQB_KNOWLEDGE_URL: http://knowledge:8000
+      SQB_KNOWLEDGE_SECRET: ${SQB_KNOWLEDGE_SECRET:-}
+      # Быстрый вход в один клик — только тестовый стенд; на сервере пусто.
+      SQB_DEMO_LOGIN: ${SQB_DEMO_LOGIN:-}
+      # Nova Platform, RAG-сервис (backend/app/services/nova/settings.py). Адрес
+      # и ключ задаются в файле .env рядом с этим файлом (образец — .env.example).
+      # Без них подключение выключено.
+      NOVA_BASE_URL: ${NOVA_BASE_URL:-}
+      NOVA_API_KEY: ${NOVA_API_KEY:-}
+      NOVA_COLLECTION: ${NOVA_COLLECTION:-ops_policies}
+      NOVA_MAX_PARALLEL: ${NOVA_MAX_PARALLEL:-2}
+      NOVA_TIMEOUT: ${NOVA_TIMEOUT:-300}
+      NOVA_FAKE: ${NOVA_FAKE:-}
+      # Прокси только для запросов к Nova, если прямого доступа с сервера нет.
+      NOVA_PROXY: ${NOVA_PROXY:-}
+      # Просмотр Excel и PowerPoint из материалов карт (сервис из профиля knowledge).
+      # Без него эти файлы только скачиваются.
+      DOCUMENT_PREVIEW_URL: http://document-preview:8000
+    networks: [default, document-preview]
+    ports:
+      # API напрямую — по умолчанию только с этой машины; на сервере в .env
+      # SQB_API_PORT=8080 (все адреса). Браузеру он не нужен: страницы ходят в /api через web.
+      - "${SQB_API_PORT:-127.0.0.1:8000}:8000"
+    volumes:
+      - canvas_cache:/data/canvas_cache
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  web:
+    build: ./app
+    ports:
+      # По умолчанию только с этой машины; на сервере в .env SQB_WEB_PORT=3000 (все адреса).
+      - "${SQB_WEB_PORT:-127.0.0.1:8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  drawio:
+    # Редактор draw.io у себя: карты банка не уходят на diagrams.net. Версия
+    # зафиксирована — встроенный редактор платформы говорит с ним по протоколу
+    # embed, и обновлять его стоит осознанно.
+    image: jgraph/drawio:32.0.2
+    ports:
+      - "127.0.0.1:8081:8080"
+    restart: unless-stopped
+
+  knowledge-db:
+    profiles: [knowledge]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: knowledge
+      POSTGRES_USER: knowledge
+      POSTGRES_PASSWORD: ${KNOWLEDGE_DB_PASSWORD:-knowledge-local-only}
+    volumes:
+      - knowledge_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowledge -d knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  knowledge:
+    profiles: [knowledge]
+    build: ./knowledge
+    environment:
+      KNOWLEDGE_DATABASE_URL: postgresql://knowledge:${KNOWLEDGE_DB_PASSWORD:-knowledge-local-only}@knowledge-db:5432/knowledge
+      SQB_KNOWLEDGE_SECRET: ${SQB_KNOWLEDGE_SECRET:-}
+      NOVA_BASE_URL: ${NOVA_BASE_URL:-}
+      NOVA_API_KEY: ${NOVA_API_KEY:-}
+      NOVA_COLLECTION: ${NOVA_COLLECTION:-}
+      NOVA_PROXY: ${NOVA_PROXY:-}
+      DOCUMENT_PREVIEW_URL: http://document-preview:8000
+    networks: [default, document-preview]
+    depends_on:
+      knowledge-db:
+        condition: service_healthy
+      document-preview:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  document-preview:
+    profiles: [knowledge]
+    build: ./document-preview
+    networks: [document-preview]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,uid=10002,gid=10002,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 1.5
+    pids_limit: 80
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  knowledge-worker:
+    profiles: [knowledge]
+    build: ./knowledge
+    command: ["python", "-m", "knowledge_service.worker"]
+    environment:
+      KNOWLEDGE_DATABASE_URL: postgresql://knowledge:${KNOWLEDGE_DB_PASSWORD:-knowledge-local-only}@knowledge-db:5432/knowledge
+      SQB_KNOWLEDGE_SECRET: ${SQB_KNOWLEDGE_SECRET:-}
+      # DOC, который не прочитал antiword, читается через копию DOCX от LibreOffice.
+      DOCUMENT_PREVIEW_URL: http://document-preview:8000
+    networks: [default, document-preview]
+    depends_on:
+      knowledge-db:
+        condition: service_healthy
+      document-preview:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "knowledge_service.worker", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  knowledge-analysis:
+    # Анализ инструкций через Nova: один запуск за раз (у ключа Nova лимит
+    # одновременных запросов). Ключ Nova есть только здесь и в API документов,
+    # но не у обработчика файлов.
+    profiles: [knowledge]
+    build: ./knowledge
+    command: ["python", "-m", "knowledge_service.analysis_worker"]
+    environment:
+      KNOWLEDGE_DATABASE_URL: postgresql://knowledge:${KNOWLEDGE_DB_PASSWORD:-knowledge-local-only}@knowledge-db:5432/knowledge
+      SQB_KNOWLEDGE_SECRET: ${SQB_KNOWLEDGE_SECRET:-}
+      NOVA_BASE_URL: ${NOVA_BASE_URL:-}
+      NOVA_API_KEY: ${NOVA_API_KEY:-}
+      NOVA_COLLECTION: ${NOVA_COLLECTION:-}
+      NOVA_PROXY: ${NOVA_PROXY:-}
+      DOCUMENT_PREVIEW_URL: http://document-preview:8000
+    networks: [default, document-preview]
+    depends_on:
+      knowledge-db:
+        condition: service_healthy
+      document-preview:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "knowledge_service.analysis_worker", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  canvas_cache:
+  knowledge_pgdata:
+
+networks:
+  document-preview:
+    internal: true

@@ -1,0 +1,22 @@
+[
+ {
+  "id": "cat_demo_root",
+  "parentId": null,
+  "kind": "space",
+  "title": "Demo Bank",
+  "position": 0,
+  "processId": null,
+  "favorite": true,
+  "createdAt": "2026-01-01T00:00:00Z"
+ },
+ {
+  "id": "cat_demo_ops",
+  "parentId": "cat_demo_root",
+  "kind": "space",
+  "title": "Операционный департамент",
+  "position": 0,
+  "processId": null,
+  "favorite": false,
+  "createdAt": "2026-01-01T00:00:00Z"
+ }
+]

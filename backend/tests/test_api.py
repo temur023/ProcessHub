@@ -1,0 +1,725 @@
+import unittest
+import uuid
+
+from fastapi.testclient import TestClient
+from app.main import app
+
+class TestSQBProcessHubApi(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_health_endpoint(self):
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "version": "1.0.0"})
+
+    def test_root_endpoint(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("docs", response.json())
+
+    def test_import_xml_and_export_lifecycle(self):
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="test-1" name="Кредитный конвейер">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="start_1" value="Поступление заявки" style="ellipse;fillColor=#10b981;" vertex="1" parent="1">
+                  <mxGeometry x="100" y="100" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="step_1" value="[PIX RPA] STEP-01: Авто-скоринг KATM" style="rounded=1;fillColor=#dcfce7;" vertex="1" parent="1">
+                  <mxGeometry x="200" y="90" width="180" height="70" as="geometry" />
+                </mxCell>
+                <mxCell id="end_1" value="Кредит выдан" style="ellipse;fillColor=#059669;" vertex="1" parent="1">
+                  <mxGeometry x="450" y="100" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="e1" edge="1" source="start_1" target="step_1" parent="1" />
+                <mxCell id="e2" edge="1" source="step_1" target="end_1" parent="1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        # 1. Test XML Import
+        import_res = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml,
+            "fileName": "credit_process.drawio"
+        })
+        self.assertEqual(import_res.status_code, 200)
+        proc = import_res.json()
+        proc_id = proc["id"]
+
+        self.assertEqual(proc["name"], "credit_process")
+        self.assertEqual(len(proc["nodes"]), 3)
+        self.assertEqual(proc["nodes"][1]["category"], "rpa_bot")
+        by_id = {n["id"]: n["type"] for n in proc["nodes"]}
+        self.assertEqual(by_id["start_1"], "startEvent")
+        self.assertEqual(by_id["end_1"], "endEvent")
+        self.assertEqual(by_id["step_1"], "serviceTask")
+
+        # 2. Test Get Process by ID
+        get_res = self.client.get(f"/api/v1/processes/{proc_id}")
+        self.assertEqual(get_res.status_code, 200)
+
+        # 3. Test Processet BPMN 2.0 Export
+        bpmn_res = self.client.get(f"/api/v1/import/{proc_id}/export/bpmn")
+        self.assertEqual(bpmn_res.status_code, 200)
+        self.assertIn("bpmn:definitions", bpmn_res.text)
+        self.assertIn("bpmndi:BPMNDiagram", bpmn_res.text)
+
+        # 4. Test Event Log CSV Export for Processet
+        log_res = self.client.get(f"/api/v1/import/{proc_id}/export/event-log")
+        self.assertEqual(log_res.status_code, 200)
+        self.assertIn("Case_ID", log_res.text)
+        log_rows = [row for row in log_res.text.splitlines() if row and not row.startswith('"Case_ID"')]
+        self.assertGreaterEqual(len(log_rows), 2)
+        starts = [row.split(",")[5] for row in log_rows]
+        self.assertGreater(len(set(starts)), 1)
+
+        # 5. Test Regulation CSV Export
+        reg_res = self.client.get(f"/api/v1/import/{proc_id}/export/regulation")
+        self.assertEqual(reg_res.status_code, 200)
+        self.assertIn("Результат операции (Выход)", reg_res.text)
+        # Значения по умолчанию в регламент не выдаются за данные.
+        self.assertNotIn("Потенциал роботизации", reg_res.text)
+        self.assertNotIn("Сотрудник банка", reg_res.text)
+
+        # 6. Test PIX Registry Case Creation
+        case_res = self.client.post(f"/api/v1/processes/{proc_id}/registry/cases", json={
+            "caseId": "SQB-2026-TEST01",
+            "assignedTo": "Кредитный эксперт филиала",
+            "data": {"client_inn": "301928374", "amount_uzs": 500000000}
+        })
+        self.assertEqual(case_res.status_code, 201)
+
+        # 7. Test Analytics & Process Mining Metrics
+        mining_res = self.client.get(f"/api/v1/analytics/{proc_id}/mining")
+        self.assertEqual(mining_res.status_code, 200)
+        self.assertIn("conformanceRate", mining_res.json())
+
+        # 8. Test RPA Candidates
+        rpa_res = self.client.get(f"/api/v1/analytics/{proc_id}/rpa-candidates")
+        self.assertEqual(rpa_res.status_code, 200)
+        self.assertTrue(len(rpa_res.json()) >= 1)
+
+    def test_paper_is_not_an_automation_candidate(self):
+        """Автоматизируют шаг, а не бумагу.
+
+        Отбор кандидатов шёл списком «всё, кроме дорожек, событий и шлюзов»,
+        и документ у шага приезжал в отчёт строкой «Документ» с потенциалом
+        65%. По двадцати двум картам банка так набегало 455 строк из 2271.
+        """
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="rpa-1" name="Bumaga">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="lane_a" value="Ofis" style="swimlane;html=1;horizontal=0;startSize=40;" vertex="1" parent="1">
+                  <mxGeometry x="40" y="40" width="900" height="200" as="geometry" />
+                </mxCell>
+                <mxCell id="start_1" value="Boshlanish" style="ellipse;html=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="60" y="80" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="step_1" value="Xatni rasmiylashtirish va jo'natish" style="shape=mxgraph.bpmn.task2;html=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="200" y="70" width="160" height="80" as="geometry" />
+                </mxCell>
+                <mxCell id="doc_1" value="" style="shape=mxgraph.bpmn.data2;html=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="168" y="36" width="25" height="33" as="geometry" />
+                </mxCell>
+                <mxCell id="end_1" value="Tugadi" style="ellipse;html=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="460" y="80" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="e1" edge="1" source="start_1" target="step_1" parent="1" />
+                <mxCell id="e2" edge="1" source="step_1" target="end_1" parent="1" />
+                <mxCell id="e3" style="dashed=1;endArrow=none;exitX=0.5;exitY=1;entryX=0;entryY=0.25;" edge="1" source="doc_1" target="step_1" parent="1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+        created = self.client.post("/api/v1/import/xml",
+                                   json={"xml": drawio_xml, "fileName": "bumaga.drawio"})
+        self.assertEqual(created.status_code, 200)
+        process = created.json()
+        proc_id = process["id"]
+        type_of = {n["id"]: n["type"] for n in process["nodes"]}
+        self.assertIn("dataObject", type_of.values(), "фикстура должна содержать документ")
+
+        candidates = self.client.get(f"/api/v1/analytics/{proc_id}/rpa-candidates").json()
+        self.assertTrue(candidates, "кандидаты должны быть")
+        self.assertEqual(
+            {type_of.get(c["nodeId"]) for c in candidates} - {"task", "userTask", "serviceTask", "subProcess"},
+            set(),
+            "в кандидатах на автоматизацию оказалась не работа",
+        )
+
+    def test_nested_timer_icons_are_not_start_events(self):
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="uz-1" name="Korporativ">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="lane_rm" value="RM" style="swimlane;html=1;horizontal=0;startSize=26;" vertex="1" parent="1">
+                  <mxGeometry x="40" y="40" width="900" height="160" as="geometry" />
+                </mxCell>
+                <mxCell id="lane_is" value="I servis" style="swimlane;html=1;horizontal=0;startSize=26;" vertex="1" parent="1">
+                  <mxGeometry x="40" y="200" width="900" height="160" as="geometry" />
+                </mxCell>
+                <mxCell id="start_1" value="Boshlanish" style="ellipse;fillColor=#10b981;" vertex="1" parent="lane_rm">
+                  <mxGeometry x="40" y="50" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="step_1" value="Murojaatni qabul qilish" style="rounded=1;" vertex="1" parent="lane_rm">
+                  <mxGeometry x="140" y="40" width="180" height="70" as="geometry" />
+                </mxCell>
+                <mxCell id="timer_child" value="" style="ellipse;html=1;aspect=fixed;shape=mxgraph.bpmn.timer;symbol=timer;" vertex="1" parent="step_1">
+                  <mxGeometry x="-8" y="-8" width="20" height="20" as="geometry" />
+                </mxCell>
+                <mxCell id="clock_sib" value="" style="ellipse;html=1;aspect=fixed;" vertex="1" parent="lane_rm">
+                  <mxGeometry x="300" y="30" width="20" height="20" as="geometry" />
+                </mxCell>
+                <mxCell id="end_1" value="Tugashi" style="ellipse;fillColor=#059669;" vertex="1" parent="lane_is">
+                  <mxGeometry x="500" y="50" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="e1" edge="1" source="start_1" target="step_1" parent="1" />
+                <mxCell id="e2" edge="1" source="step_1" target="end_1" parent="1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        import_res = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml,
+            "fileName": "korporativ.drawio",
+        })
+        self.assertEqual(import_res.status_code, 200, import_res.text)
+        proc = import_res.json()
+        ids = {n["id"] for n in proc["nodes"]}
+        self.assertIn("start_1", ids)
+        self.assertIn("step_1", ids)
+        self.assertIn("end_1", ids)
+        self.assertNotIn("timer_child", ids)
+        self.assertNotIn("clock_sib", ids)
+        starts = [n for n in proc["nodes"] if n["type"] == "startEvent"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["id"], "start_1")
+        lane_names = {l["name"] for l in proc["lanes"]}
+        self.assertIn("RM", lane_names)
+        self.assertIn("I servis", lane_names)
+
+    def test_mxgraph_absolute_coords_and_edge_anchors(self):
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="geo-1" name="Geo">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="pool" value="Pool" style="swimlane;html=1;childLayout=stackLayout;horizontal=0;startSize=20;" vertex="1" parent="1">
+                  <mxGeometry x="10" y="20" width="600" height="200" as="geometry" />
+                </mxCell>
+                <mxCell id="lane_a" value="Lane A" style="swimlane;html=1;horizontal=0;startSize=26;" vertex="1" parent="pool">
+                  <mxGeometry x="0" y="20" width="600" height="180" as="geometry" />
+                </mxCell>
+                <mxCell id="task_a" value="Task A" style="rounded=1;align=left;verticalAlign=top;spacing=4;" vertex="1" parent="lane_a">
+                  <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="task_b" value="Task B" style="rounded=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="260" y="40" width="120" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="e_ab" value="" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="lane_a" source="task_a" target="task_b">
+                  <mxGeometry relative="1" as="geometry">
+                    <Array as="points">
+                      <mxPoint x="200" y="70" />
+                    </Array>
+                  </mxGeometry>
+                </mxCell>
+                <mxCell id="e_ab_label" value="Ha" style="edgeLabel;html=1;" vertex="1" connectable="0" parent="e_ab">
+                  <mxGeometry x="0.5" y="-12" relative="1" as="geometry">
+                    <mxPoint x="0" y="0" as="offset" />
+                  </mxGeometry>
+                </mxCell>
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        import_res = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml,
+            "fileName": "geo.drawio",
+        })
+        self.assertEqual(import_res.status_code, 200, import_res.text)
+        proc = import_res.json()
+        by_id = {n["id"]: n for n in proc["nodes"]}
+        self.assertIn("task_a", by_id)
+        # Absolute = local + lane (0,20) + pool (10,20) => (50, 80).
+        # Рамку после разбора подгоняют под подпись, поэтому сверяем центр:
+        # именно он обязан остаться там, где фигуру поставил аналитик.
+        geo_a = by_id["task_a"]["geometry"]
+        self.assertEqual(geo_a["x"], 50)
+        self.assertEqual(geo_a["width"], 120)
+        self.assertEqual(geo_a["y"] + geo_a["height"] / 2, 80 + 60 / 2)
+        self.assertEqual(by_id["task_b"]["geometry"]["x"], 270)
+        edges = {e["id"]: e for e in proc["edges"]}
+        self.assertIn("e_ab", edges)
+        edge = edges["e_ab"]
+        self.assertEqual(edge["exitX"], 1)
+        self.assertEqual(edge["exitY"], 0.5)
+        self.assertEqual(edge["entryX"], 0)
+        self.assertEqual(edge["entryY"], 0.5)
+        self.assertEqual(edge["name"], "Ha")
+        self.assertEqual(edge["labelX"], 0.5)
+        self.assertEqual(edge["labelY"], -12)
+        # Waypoint 200,70 is in lane space: + pool(10,20) + lane(0,20) = 210, 110
+        self.assertEqual(len(edge["points"]), 1)
+        self.assertEqual(edge["points"][0]["x"], 210)
+        self.assertEqual(edge["points"][0]["y"], 110)
+
+    def test_green_end_event_and_question_task_not_gateway(self):
+        from app.services.drawio_parser import classify_vertex
+        self.assertEqual(
+            classify_vertex('ellipse;fillColor=#059669;', 'Кредит выдан', True, False, 'end_1'),
+            'endEvent',
+        )
+        self.assertEqual(
+            classify_vertex('ellipse;fillColor=#10b981;', 'Поступление заявки', False, True, 'start_1'),
+            'startEvent',
+        )
+        self.assertEqual(
+            classify_vertex('rounded=1;', 'Документы полные?', True, True, 'step_docs'),
+            'userTask',
+        )
+
+    def test_bpmn_import_and_xml_escape(self):
+        bpmn = """<?xml version="1.0" encoding="UTF-8"?>
+        <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                          xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                          xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                          id="Defs_1" targetNamespace="http://bpmn.io/schema/bpmn">
+          <bpmn:process id="Process_1" name="Onboarding &amp; KYC" isExecutable="true">
+            <bpmn:startEvent id="s1" name="Старт"/>
+            <bpmn:userTask id="t1" name="Проверка ИНН &amp; паспорт"/>
+            <bpmn:endEvent id="e1" name="Готово"/>
+            <bpmn:sequenceFlow id="f1" sourceRef="s1" targetRef="t1"/>
+            <bpmn:sequenceFlow id="f2" sourceRef="t1" targetRef="e1"/>
+          </bpmn:process>
+        </bpmn:definitions>"""
+
+        import_res = self.client.post("/api/v1/import/xml", json={
+            "xml": bpmn,
+            "fileName": "onboarding.bpmn"
+        })
+        self.assertEqual(import_res.status_code, 200, import_res.text)
+        proc = import_res.json()
+        self.assertGreaterEqual(len(proc["nodes"]), 3)
+        types = {n["type"] for n in proc["nodes"]}
+        self.assertIn("startEvent", types)
+        self.assertIn("endEvent", types)
+        self.assertIn("userTask", types)
+
+        bpmn_res = self.client.get(f"/api/v1/import/{proc['id']}/export/bpmn")
+        self.assertEqual(bpmn_res.status_code, 200)
+        self.assertIn("Проверка ИНН &amp; паспорт", bpmn_res.text)
+        self.assertNotIn('name="Проверка ИНН & паспорт"', bpmn_res.text)
+        self.assertIn("<bpmn:incoming>f1</bpmn:incoming>", bpmn_res.text)
+
+    def test_mxgraph_bpmn_stencil_classification(self):
+        from app.services.drawio_parser import classify_vertex
+        self.assertEqual(
+            classify_vertex('shape=mxgraph.bpmn.event;outline=standard;symbol=general;', 'Boshlanish', False, True, 'ev1'),
+            'startEvent',
+        )
+        self.assertEqual(
+            classify_vertex('shape=mxgraph.bpmn.event;outline=end;symbol=terminate;', 'Tugashi', True, False, 'ev2'),
+            'endEvent',
+        )
+        self.assertEqual(
+            classify_vertex('shape=mxgraph.bpmn.task2;whiteSpace=wrap;taskMarker=user;', 'Mijoz ehtiyojini aniqlash', True, True, 't1'),
+            'userTask',
+        )
+        self.assertEqual(
+            classify_vertex('shape=mxgraph.bpmn.task2;taskMarker=service;', 'Avto-skoring', True, True, 't2'),
+            'serviceTask',
+        )
+        self.assertEqual(
+            classify_vertex('shape=mxgraph.bpmn.gateway2;gwType=exclusive;', 'Risk?', True, True, 'g1'),
+            'exclusiveGateway',
+        )
+        self.assertEqual(
+            classify_vertex('shape=mxgraph.bpmn.gateway2;gwType=parallel;', '+', True, True, 'g2'),
+            'parallelGateway',
+        )
+
+    def test_bpmn_export_waypoints_conditions_and_collaboration(self):
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="geo-2" name="Geo">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="pool" value="Pool" style="swimlane;html=1;childLayout=stackLayout;horizontal=0;startSize=20;" vertex="1" parent="1">
+                  <mxGeometry x="10" y="20" width="600" height="200" as="geometry" />
+                </mxCell>
+                <mxCell id="lane_a" value="Lane A" style="swimlane;html=1;horizontal=0;startSize=26;" vertex="1" parent="pool">
+                  <mxGeometry x="0" y="20" width="600" height="180" as="geometry" />
+                </mxCell>
+                <mxCell id="task_a" value="Task A" style="rounded=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="40" y="40" width="120" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="task_b" value="Task B" style="rounded=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="260" y="40" width="120" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="e_ab" value="" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="lane_a" source="task_a" target="task_b">
+                  <mxGeometry relative="1" as="geometry">
+                    <Array as="points">
+                      <mxPoint x="200" y="70" />
+                    </Array>
+                  </mxGeometry>
+                </mxCell>
+                <mxCell id="e_ab_label" value="Ha" style="edgeLabel;html=1;" vertex="1" connectable="0" parent="e_ab">
+                  <mxGeometry x="0.5" y="-12" relative="1" as="geometry" />
+                </mxCell>
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        import_res = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml,
+            "fileName": "geo_export.drawio",
+        })
+        self.assertEqual(import_res.status_code, 200, import_res.text)
+        proc_id = import_res.json()["id"]
+        bpmn_res = self.client.get(f"/api/v1/import/{proc_id}/export/bpmn")
+        self.assertEqual(bpmn_res.status_code, 200)
+        xml = bpmn_res.text
+        self.assertIn("bpmn:collaboration", xml)
+        self.assertIn("bpmn:participant", xml)
+        self.assertIn("Lane A", xml)
+        # Ломаная выходит из правой грани task_a и входит в левую грань task_b.
+        # Излом draw.io на (210,110) лежит ровно на этом отрезке, поэтому
+        # трассировщик его убирает — геометрия линии от этого не меняется.
+        self.assertIn('<di:waypoint x="170" y="110" />', xml)
+        self.assertIn('<di:waypoint x="270" y="110" />', xml)
+        self.assertIn("conditionExpression", xml)
+        self.assertIn("Ha", xml)
+        disp = bpmn_res.headers.get("content-disposition", "") or bpmn_res.headers.get("Content-Disposition", "")
+        self.assertIn("_Processet.bpmn", disp)
+
+    def test_pmm_export_three_xml_package(self):
+        import io
+        import re
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="pmm-1" name="PMM">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="pool" value="Pool" style="swimlane;html=1;childLayout=stackLayout;horizontal=0;startSize=20;" vertex="1" parent="1">
+                  <mxGeometry x="10" y="20" width="700" height="220" as="geometry" />
+                </mxCell>
+                <mxCell id="lane_a" value="Lane A" style="swimlane;html=1;horizontal=0;startSize=26;" vertex="1" parent="pool">
+                  <mxGeometry x="0" y="20" width="700" height="200" as="geometry" />
+                </mxCell>
+                <mxCell id="start_1" value="Старт" style="ellipse;fillColor=#10b981;" vertex="1" parent="lane_a">
+                  <mxGeometry x="30" y="70" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="task_a" value="Task A" style="rounded=1;" vertex="1" parent="lane_a">
+                  <mxGeometry x="120" y="60" width="120" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="gw_1" value="Risk?" style="shape=mxgraph.bpmn.gateway2;gwType=exclusive;" vertex="1" parent="lane_a">
+                  <mxGeometry x="280" y="62" width="50" height="50" as="geometry" />
+                </mxCell>
+                <mxCell id="step_rpa" value="[PIX RPA] Авто-скоринг" style="rounded=1;fillColor=#dcfce7;" vertex="1" parent="lane_a">
+                  <mxGeometry x="370" y="60" width="160" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="end_1" value="Готово" style="ellipse;fillColor=#059669;" vertex="1" parent="lane_a">
+                  <mxGeometry x="580" y="70" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="e_st" edge="1" source="start_1" target="task_a" parent="lane_a" />
+                <mxCell id="e_tg" edge="1" source="task_a" target="gw_1" parent="lane_a" />
+                <mxCell id="e_yes" value="" style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="lane_a" source="gw_1" target="step_rpa">
+                  <mxGeometry relative="1" as="geometry">
+                    <Array as="points">
+                      <mxPoint x="345" y="87" />
+                    </Array>
+                  </mxGeometry>
+                </mxCell>
+                <mxCell id="e_yes_label" value="Ha" style="edgeLabel;html=1;" vertex="1" connectable="0" parent="e_yes">
+                  <mxGeometry x="0.5" y="-12" relative="1" as="geometry" />
+                </mxCell>
+                <mxCell id="e_rpa_end" edge="1" source="step_rpa" target="end_1" parent="lane_a" />
+                <mxCell id="e_no" value="Yo'q" style="dashed=1;dashPattern=8 8;" edge="1" parent="lane_a" source="gw_1" target="end_1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        import_res = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml,
+            "fileName": "pmm_export.drawio",
+        })
+        self.assertEqual(import_res.status_code, 200, import_res.text)
+        proc = import_res.json()
+        proc_id = proc["id"]
+
+        missing = self.client.get("/api/v1/import/does-not-exist/export/pmm")
+        self.assertEqual(missing.status_code, 404)
+
+        pmm_res = self.client.get(f"/api/v1/import/{proc_id}/export/pmm")
+        self.assertEqual(pmm_res.status_code, 200)
+        disp = pmm_res.headers.get("content-disposition", "") or pmm_res.headers.get("Content-Disposition", "")
+        self.assertIn("PIX_Map.pmm", disp)
+
+        zf = zipfile.ZipFile(io.BytesIO(pmm_res.content))
+        names = set(zf.namelist())
+        self.assertIn("main.xml", names)
+        self.assertIn("pm/configuration.xml", names)
+        map_names = [n for n in names if n.startswith("pm/maps/") and n.endswith(".xml")]
+        self.assertEqual(len(map_names), 1)
+        self.assertEqual(len(names), 3)
+
+        main_xml = zf.read("main.xml").decode("utf-8")
+        conf_xml = zf.read("pm/configuration.xml").decode("utf-8")
+        map_xml = zf.read(map_names[0]).decode("utf-8")
+
+        self.assertIn('PartName="/pm/configuration.xml"', main_xml)
+        self.assertIn(f'PartName="/{map_names[0]}"', main_xml)
+        ET.fromstring(main_xml)
+
+        conf = ET.fromstring(conf_xml)
+        self.assertEqual(conf.tag, "configuration")
+        self.assertTrue(any(el.get("name") == "BPMN" for el in conf.findall("notation")))
+        bpmn = next(el for el in conf.findall("notation") if el.get("name") == "BPMN")
+        bpmn_els = {el.get("name") for el in bpmn.findall("element")}
+        for needed in ("horizontalRoad", "emptyPool", "task", "userTask", "serviceTask", "gateway_xor", "start_event_none", "end_event_none"):
+            self.assertIn(needed, bpmn_els)
+        self.assertIn("Горизонтальный пул", conf_xml)
+        self.assertTrue(len(conf.findall("propertyTemplate")) >= 10)
+
+        root = ET.fromstring(map_xml)
+        self.assertEqual(root.tag, "Map")
+        # Нотация карты должна быть одной из объявленных в каталоге. Регистр
+        # при этом свой у каждой стороны: каталог объявляет «BPMN», а сама
+        # студия пишет в карту «bpmn» (tests/fixtures/sap.pmm) — пишем как она.
+        notation_names = {n.get("name") for n in conf.findall("notation")}
+        self.assertEqual(root.get("notation"), "bpmn")
+        self.assertIn(root.get("notation").lower(), {n.lower() for n in notation_names})
+        allowed = {
+            e.get("name")
+            for n in conf.findall("notation")
+            if (n.get("name") or "").lower() == root.get("notation").lower()
+            for e in n.findall("element")
+        }
+        used_types = {node.get("type") for node in root.iter("node")}
+        self.assertTrue(used_types)
+        self.assertEqual(used_types - allowed, set(), "тип фигуры вне нотации студии")
+        nodes = root.findall("node")
+        types = {n.get("type") for n in nodes}
+        self.assertIn("horizontalRoad", types)
+        self.assertIn("emptyPool", types)
+
+        road = next(n for n in nodes if n.get("type") == "horizontalRoad")
+        self.assertEqual(road.get("label"), "Lane A")
+        self.assertEqual(road.get("fill_color"), "var(--bg-accent-road-node)")
+        children = list(road)
+        child_types = {c.get("type") for c in children}
+        self.assertIn("start_event_none", child_types)
+        self.assertIn("task", child_types)
+        self.assertIn("gateway_xor", child_types)
+        # Все действия уезжают плоской «Задачей»: студия рисует у
+        # пользовательской человечка, у сервисной шестерёнку, и рисует их в
+        # левом верхнем углу — поверх первых букв подписи. В draw.io, который
+        # для нас эталон вида карты, у шагов иконок нет.
+        self.assertNotIn("userTask", child_types)
+        self.assertNotIn("serviceTask", child_types)
+        self.assertIn("end_event_none", child_types)
+
+        uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+        for n in nodes + children:
+            self.assertTrue(uuid_re.match(n.get("id") or ""), n.get("id"))
+
+        # Nested coords are relative to the road origin (lane abs = pool 10,20 + lane 0,20 => 10,40).
+        # Высоту рамки подгоняют под подпись, поэтому сверяем центр по вертикали.
+        task = next(c for c in children if c.get("type") == "task")
+        self.assertEqual(int(task.get("x")), 120)
+        self.assertEqual(
+            int(task.get("y")) + int(task.get("height")) / 2, 60 + 60 / 2
+        )
+
+        connectors = root.findall("connector")
+        self.assertGreaterEqual(len(connectors), 5)
+        self.assertTrue(all(c.get("type") == "step" for c in connectors))
+        # Точки крепления пишутся у каждой связи: без sourcePoint PIX ведёт
+        # линию от правой середины фигуры, куда бы ни уходила ломаная. Номера —
+        # из тех трёх точек на грани, что есть у каждой фигуры PIX.
+        source_ids = {"0", "2", "4", "6", "14", "15", "18", "19", "22", "23", "26", "27"}
+        target_ids = {"1", "3", "4", "6", "16", "17", "20", "21", "24", "25", "28", "29"}
+        self.assertTrue(all(c.get("sourcePoint") in source_ids for c in connectors))
+        self.assertTrue(all(c.get("targetPoint") in target_ids for c in connectors))
+        # Ветка «Yo'q» нарисована пунктиром, но это переход, а не ассоциация:
+        # пунктир остаётся, а стрелка — как у перехода. Раньше любая пунктирная
+        # связь получала оформление ассоциации и уезжала в студию без стрелки.
+        # Маркер конца — из словаря студии: `arrow` в её выгрузке не встречается
+        # ни разу, а незнакомый маркер она молча отбрасывает вместе со связью.
+        dashed = next(c for c in connectors if c.get("Text") == "Yo'q")
+        self.assertEqual(dashed.get("lineStyle"), "dashed")
+        self.assertEqual(dashed.findtext("MarkerStart"), "line")
+        self.assertEqual(dashed.findtext("MarkerEnd"), "arrowclosed")
+        # Стиль линии — только атрибут; дочернего <lineStyle> у студии нет.
+        self.assertIsNone(dashed.find("lineStyle"))
+        solid = next(c for c in connectors if c.get("lineStyle") == "solid")
+        self.assertEqual(solid.findtext("MarkerStart"), "line")
+        self.assertEqual(solid.findtext("MarkerEnd"), "arrowclosed")
+        # Подпись связи PIX читает из Text, а не из label.
+        labeled = next((c for c in connectors if c.get("Text") == "Ha"), None)
+        self.assertIsNotNone(labeled)
+        self.assertTrue(all(c.get("label") is None for c in connectors))
+        self.assertTrue(any(c.find("waypoint") is not None for c in connectors))
+        for c in connectors:
+            self.assertTrue(uuid_re.match(c.get("id") or ""), c.get("id"))
+            self.assertTrue(uuid_re.match(c.get("sourceNodeId") or ""))
+            self.assertTrue(uuid_re.match(c.get("targetNodeId") or ""))
+
+    def test_export_check_covers_both_rule_sets(self):
+        """Панель экспорта обязана видеть и строгий профиль студии.
+
+        Проверок на пакет .pmm две: по формату пакета и по профилю PIX. Вторая
+        строже, и если эндпоинт вернёт только первую, сотрудник получит
+        зелёный баннер на пакете, который Процессная студия не откроет. BPMN в
+        PIX больше не уезжает, и его здесь нет.
+        """
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="check-1" name="Проверка выгрузки">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="s" value="Начало" style="ellipse;fillColor=#10b981;" vertex="1" parent="1">
+                  <mxGeometry x="100" y="100" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="t" value="STEP-01: Проверка документов" style="rounded=1;" vertex="1" parent="1">
+                  <mxGeometry x="200" y="90" width="180" height="70" as="geometry" />
+                </mxCell>
+                <mxCell id="e" value="Готово" style="ellipse;fillColor=#059669;" vertex="1" parent="1">
+                  <mxGeometry x="450" y="100" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="e1" edge="1" source="s" target="t" parent="1" />
+                <mxCell id="e2" edge="1" source="t" target="e" parent="1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        proc_id = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml, "fileName": "check.drawio",
+        }).json()["id"]
+
+        report = self.client.get(f"/api/v1/import/{proc_id}/export/check")
+        self.assertEqual(report.status_code, 200)
+        body = report.json()
+
+        formats = {f["format"] for f in body["formats"]}
+        self.assertEqual(formats, {"pmm", "pmm/pix"})
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(body["summary"], "ok")
+
+    def test_export_check_and_download_headers_agree(self):
+        """Один и тот же файл — один и тот же вердикт в панели и в заголовках.
+
+        Расхождение здесь опаснее любой ошибки: сотрудник поверит баннеру,
+        а студия откажет.
+        """
+        drawio_xml = """<mxfile host="app.diagrams.net">
+          <diagram id="check-2" name="Согласованность">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="s" value="Старт" style="ellipse;fillColor=#10b981;" vertex="1" parent="1">
+                  <mxGeometry x="80" y="80" width="48" height="48" as="geometry" />
+                </mxCell>
+                <mxCell id="t" value="Операция" style="rounded=1;" vertex="1" parent="1">
+                  <mxGeometry x="200" y="70" width="160" height="60" as="geometry" />
+                </mxCell>
+                <mxCell id="e1" edge="1" source="s" target="t" parent="1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+
+        proc_id = self.client.post("/api/v1/import/xml", json={
+            "xml": drawio_xml, "fileName": "agree.drawio",
+        }).json()["id"]
+
+        body = self.client.get(f"/api/v1/import/{proc_id}/export/check").json()
+        by_format = {f["format"]: f for f in body["formats"]}
+
+        # В PIX уезжает только .pmm — его одного и проверяет панель экспорта.
+        for fmt in ("pmm",):
+            download = self.client.get(f"/api/v1/import/{proc_id}/export/{fmt}")
+            self.assertEqual(download.status_code, 200)
+            self.assertEqual(
+                download.headers["X-Export-Check-Errors"],
+                str(by_format[fmt]["errors"]),
+                f"{fmt}: панель и заголовок разошлись по стандарту",
+            )
+            self.assertEqual(
+                download.headers["X-Pix-Check-Errors"],
+                str(by_format[f"{fmt}/pix"]["errors"]),
+                f"{fmt}: панель и заголовок разошлись по профилю PIX",
+            )
+
+    def test_reimporting_the_same_file_updates_one_record(self):
+        # Пока id карты был случайным, каждый повторный импорт заводил ещё одну
+        # запись: в списке «Процессы на сервере» их набралось 210 с
+        # повторяющимися именами, и отличить свежую от снятой прежней сборкой
+        # платформы стало нечем. Сотрудник открыл старую копию — цилиндры в ней
+        # разобрались шагами, а пунктиры потоком, — и решил, что платформа
+        # потеряла связи.
+        xml = """<mxfile host="app.diagrams.net">
+          <diagram id="d1" name="Карта">
+            <mxGraphModel>
+              <root>
+                <mxCell id="0" />
+                <mxCell id="1" parent="0" />
+                <mxCell id="s1" value="Приём заявки 5 мин" style="rounded=1;" vertex="1" parent="1">
+                  <mxGeometry x="100" y="100" width="180" height="80" as="geometry" />
+                </mxCell>
+                <mxCell id="s2" value="Оформление 3 мин" style="rounded=1;" vertex="1" parent="1">
+                  <mxGeometry x="400" y="100" width="180" height="80" as="geometry" />
+                </mxCell>
+                <mxCell id="f1" edge="1" source="s1" target="s2" parent="1" />
+              </root>
+            </mxGraphModel>
+          </diagram>
+        </mxfile>"""
+        # Имя файла своё на каждый прогон: временное хранилище теста живёт
+        # между прогонами, и записи прошлого прогона иначе попадают в счёт.
+        name = f"one_and_the_same_{uuid.uuid4().hex[:8]}.drawio"
+        body = {"xml": xml, "fileName": name}
+        first = self.client.post("/api/v1/import/xml", json=body)
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post("/api/v1/import/xml", json=body)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            first.json()["id"], second.json()["id"],
+            "повторный импорт того же файла обязан обновлять запись, а не заводить новую")
+
+        listed = self.client.get("/api/v1/processes/").json()
+        same = [p for p in listed if p["fileName"] == name]
+        self.assertEqual(len(same), 1, f"в хранилище {len(same)} копий одной карты: {same}")
+
+        other = dict(body, fileName=f"another_map_{uuid.uuid4().hex[:8]}.drawio")
+        third = self.client.post("/api/v1/import/xml", json=other)
+        self.assertNotEqual(
+            third.json()["id"], first.json()["id"],
+            "разные файлы обязаны лежать разными записями")
+
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,29 @@
+# API платформы. Принимает соединения только с самого сервера: снаружи — через nginx (/api/).
+[Unit]
+Description=Process Hub: API платформы (127.0.0.1:8000)
+After=network-online.target
+Wants=network-online.target
+PartOf=processhub.target
+# Пока база недоступна, API не стартует; перезапускаем без ограничения числа попыток.
+StartLimitIntervalSec=0
+
+[Service]
+User=sqb
+Group=sqb
+WorkingDirectory=/opt/processhub/backend
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Environment=SQB_KNOWLEDGE_URL=http://127.0.0.1:8010
+Environment=SQB_CANVAS_CACHE=/var/lib/processhub-api/canvas_cache
+EnvironmentFile=/etc/processhub/api.env
+StateDirectory=processhub-api
+# --proxy-headers: схему https uvicorn берёт из X-Forwarded-Proto от nginx (флаг Secure у cookie).
+ExecStart=/opt/processhub/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=processhub.target

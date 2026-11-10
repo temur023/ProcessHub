@@ -1,0 +1,9 @@
+# Все службы Process Hub разом: systemctl restart|stop|status processhub.target
+# Службы входят в цель через WantedBy=; install.sh включает только установленные.
+[Unit]
+Description=SQB Process Hub
+After=network-online.target
+Wants=network-online.target
+
+[Install]
+WantedBy=multi-user.target

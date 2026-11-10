@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sqb-api",
+      "runtimeExecutable": "backend/.venv/bin/uvicorn",
+      "runtimeArgs": ["app.main:app", "--app-dir", "backend", "--reload", "--reload-dir", "backend/app", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "sqb-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "app"],
+      "port": 5173
+    }
+  ]
+}

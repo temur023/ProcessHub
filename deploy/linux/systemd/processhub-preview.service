@@ -1,0 +1,27 @@
+# Просмотр Word: LibreOffice без макросов, без сети и без доступа к базе, отдельной
+# учётной записью. Ограничения повторяют контейнер document-preview из docker-compose.yml.
+[Unit]
+Description=Process Hub: просмотр Word (127.0.0.1:8020)
+PartOf=processhub.target
+
+[Service]
+User=preview
+Group=preview
+WorkingDirectory=/opt/processhub/document-preview
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/tmp SAL_USE_VCLPLUGIN=svp
+ExecStart=/opt/processhub/venv/bin/uvicorn service:app --host 127.0.0.1 --port 8020 --limit-concurrency 4
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Сеть — только внутри сервера: принимает запросы сервиса документов, наружу не ходит.
+IPAddressAllow=localhost
+IPAddressDeny=any
+MemoryMax=768M
+CPUQuota=150%
+TasksMax=80
+
+[Install]
+WantedBy=processhub.target

@@ -1,0 +1,37 @@
+# Виртуальное окружение бэкенда: тысячи чужих файлов, которые git иначе
+# начинает нормализовать по core.autocrlf и сыпать предупреждениями
+# «LF will be replaced by CRLF».
+backend/venv/
+backend/.venv/
+
+# Байткод Python
+__pycache__/
+*.pyc
+
+# Секреты и локальное состояние
+.env
+.env.*
+!.env.example
+knowledge/.venv/
+knowledge-backup*.dump
+.DS_Store
+backend/app/data/process_store.json
+# Резервные копии хранилища: снимаются перед чисткой дублей, вес — десятки МБ.
+backend/app/data/process_store.json.backup-*
+
+# Результаты опытов с импортом в PIX: снимки журналов машины аналитика,
+# в репозитории им не место. Сам набор проб генерируется скриптом.
+backend/scripts/pix_probe/probe_results/
+backend/scripts/pix_probe/pix_test_suite/
+.DS_Store
+
+# Комплект для переноса на корпоративный компьютер: копия базы и редактор
+# draw.io. Копия базы — данные банка, в репозитории ей не место.
+transfer/
+# Редактор draw.io для запуска без Docker (scripts\start-drawio.ps1) — чужие файлы.
+drawio-webapp/
+drawio-webapp.tmp*
+# Журналы сервисов при запуске без Docker (scripts\start-all.ps1).
+logs/
+# Кэш раскладки холста — производная от карт банка, пересчитывается сам.
+backend/app/data/canvas_cache/

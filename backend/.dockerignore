@@ -1,0 +1,12 @@
+# В образ API идут только requirements.txt и app/ без локальных данных.
+venv/
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+tests/
+scripts/
+# Карты живут в базе; прежнее файловое хранилище и его копии — 140 МБ.
+app/data/process_store.json*
+app/data/canvas_cache/
+app/data/*.tmp
