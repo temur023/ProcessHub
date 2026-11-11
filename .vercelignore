@@ -1,0 +1,14 @@
+knowledge/tests
+knowledge/dev
+/document-preview
+/deploy
+/docs
+/scripts
+/.agents
+/.cursor
+/.claude
+app/node_modules
+app/dist
+backend/tests
+backend/scripts
+backend/.venv
