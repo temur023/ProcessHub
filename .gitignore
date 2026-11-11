@@ -35,3 +35,6 @@ drawio-webapp.tmp*
 logs/
 # Кэш раскладки холста — производная от карт банка, пересчитывается сам.
 backend/app/data/canvas_cache/
+.vercel
+.env*
+!.env.example

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "cd app && npm ci",
+  "buildCommand": "cd app && npm run build",
+  "outputDirectory": "app/dist",
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "{backend/app/**,knowledge/knowledge_service/**}",
+      "maxDuration": 60
+    },
+    "api/knowledge.py": {
+      "includeFiles": "knowledge/knowledge_service/**",
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/_knowledge/(.*)",
+      "destination": "/api/knowledge"
+    },
+    {
+      "source": "/drawio/:path*",
+      "destination": "https://embed.diagrams.net/:path*"
+    },
+    {
+      "source": "/((?!assets/|pdfjs/).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "regions": [
+    "fra1"
+  ]
+}
